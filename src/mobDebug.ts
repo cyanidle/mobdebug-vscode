@@ -15,11 +15,10 @@ import {
 	LoggingDebugSession,
 	InitializedEvent, TerminatedEvent, StoppedEvent, BreakpointEvent, OutputEvent,
 	ProgressStartEvent, ProgressUpdateEvent, ProgressEndEvent, InvalidatedEvent,
-	Thread, StackFrame, Scope, Source, Handles, Breakpoint, MemoryEvent
+	StackFrame, Scope, Source, Handles, Breakpoint, MemoryEvent
 } from '@vscode/debugadapter';
 import { DebugProtocol } from '@vscode/debugprotocol';
 import { basename } from 'path-browserify';
-import { MockRuntime, IRuntimeBreakpoint, FileAccessor, RuntimeVariable, timeout, IRuntimeVariableType } from './mockRuntime';
 import { Subject } from 'await-notify';
 import * as base64 from 'base64-js';
 
@@ -47,34 +46,8 @@ interface IAttachRequestArguments extends ILaunchRequestArguments { }
 
 export class MobDebugSession extends LoggingDebugSession {
 
-	// we don't support multiple threads, so we can use a hardcoded ID for the default thread
-	private static threadID = 1;
-
-	// a Mock runtime (or debugger)
-	private _runtime: MockRuntime;
-
-	private _variableHandles = new Handles<'locals' | 'globals' | RuntimeVariable>();
-
-	private _configurationDone = new Subject();
-
-	private _cancellationTokens = new Map<number, boolean>();
-
-	private _reportProgress = false;
-	private _progressId = 10000;
-	private _cancelledProgressId: string | undefined = undefined;
-	private _isProgressCancellable = true;
-
-	private _valuesInHex = false;
-	private _useInvalidatedEvent = false;
-
-	private _addressesInHex = true;
-
-	/**
-	 * Creates a new debug adapter that is used for one debug session.
-	 * We configure the default implementation of a debug adapter here.
-	 */
 	public constructor(fileAccessor: FileAccessor) {
-		super("mock-debug.txt");
+		super("mobdebug.txt");
 
 		// this debugger uses zero-based lines and columns
 		this.setDebuggerLinesStartAt1(false);
@@ -134,19 +107,7 @@ export class MobDebugSession extends LoggingDebugSession {
 		});
 	}
 
-	/**
-	 * The 'initialize' request is the first request called by the frontend
-	 * to interrogate the features the debug adapter provides.
-	 */
-	protected initializeRequest(response: DebugProtocol.InitializeResponse, args: DebugProtocol.InitializeRequestArguments): void {
-
-		if (args.supportsProgressReporting) {
-			this._reportProgress = true;
-		}
-		if (args.supportsInvalidatedEvent) {
-			this._useInvalidatedEvent = true;
-		}
-
+	protected initializeRequest(response: DebugProtocol.InitializeResponse, args: DebugProtocol.InitializeRequestArguments) {
 		// build and return the capabilities of this debug adapter:
 		response.body = response.body || {};
 
@@ -157,17 +118,17 @@ export class MobDebugSession extends LoggingDebugSession {
 		response.body.supportsEvaluateForHovers = true;
 
 		// make VS Code show a 'step back' button
-		response.body.supportsStepBack = true;
+		response.body.supportsStepBack = false;
 
 		// make VS Code support data breakpoints
 		response.body.supportsDataBreakpoints = true;
 
 		// make VS Code support completion in REPL
-		response.body.supportsCompletionsRequest = true;
+		response.body.supportsCompletionsRequest = false;
 		response.body.completionTriggerCharacters = [ ".", "[" ];
 
 		// make VS Code send cancel request
-		response.body.supportsCancelRequest = true;
+		response.body.supportsCancelRequest = false;
 
 		// make VS Code send the breakpointLocations request
 		response.body.supportsBreakpointLocationsRequest = true;
@@ -176,24 +137,8 @@ export class MobDebugSession extends LoggingDebugSession {
 		response.body.supportsStepInTargetsRequest = true;
 
 		// the adapter defines two exceptions filters, one with support for conditions.
-		response.body.supportsExceptionFilterOptions = true;
-		response.body.exceptionBreakpointFilters = [
-			{
-				filter: 'namedException',
-				label: "Named Exception",
-				description: `Break on named exceptions. Enter the exception's name as the Condition.`,
-				default: false,
-				supportsCondition: true,
-				conditionDescription: `Enter the exception's name`
-			},
-			{
-				filter: 'otherExceptions',
-				label: "Other Exceptions",
-				description: 'This is a other exception',
-				default: true,
-				supportsCondition: false
-			}
-		];
+		response.body.supportsExceptionFilterOptions = false;
+		response.body.exceptionBreakpointFilters = [];
 
 		// make VS Code send exceptionInfo request
 		response.body.supportsExceptionInfoRequest = true;
@@ -205,18 +150,17 @@ export class MobDebugSession extends LoggingDebugSession {
 		response.body.supportsSetExpression = true;
 
 		// make VS Code send disassemble request
-		response.body.supportsDisassembleRequest = true;
-		response.body.supportsSteppingGranularity = true;
-		response.body.supportsInstructionBreakpoints = true;
+		response.body.supportsDisassembleRequest = false;
+		response.body.supportsSteppingGranularity = false;
+		response.body.supportsInstructionBreakpoints = false;
 
-		// make VS Code able to read and write variable memory
-		response.body.supportsReadMemoryRequest = true;
-		response.body.supportsWriteMemoryRequest = true;
+		response.body.supportsReadMemoryRequest = false;
+		response.body.supportsWriteMemoryRequest = false;
 
 		response.body.supportSuspendDebuggee = true;
 		response.body.supportTerminateDebuggee = true;
-		response.body.supportsFunctionBreakpoints = true;
-		response.body.supportsDelayedStackTraceLoading = true;
+		response.body.supportsFunctionBreakpoints = false;
+		response.body.supportsDelayedStackTraceLoading = false;
 
 		this.sendResponse(response);
 
@@ -816,97 +760,6 @@ export class MobDebugSession extends LoggingDebugSession {
 		} else {
 			super.customRequest(command, response, args);
 		}
-	}
-
-	//---- helpers
-
-	private convertToRuntime(value: string): IRuntimeVariableType {
-
-		value= value.trim();
-
-		if (value === 'true') {
-			return true;
-		}
-		if (value === 'false') {
-			return false;
-		}
-		if (value[0] === '\'' || value[0] === '"') {
-			return value.substr(1, value.length-2);
-		}
-		const n = parseFloat(value);
-		if (!isNaN(n)) {
-			return n;
-		}
-		return value;
-	}
-
-	private convertFromRuntime(v: RuntimeVariable): DebugProtocol.Variable {
-
-		let dapVariable: DebugProtocol.Variable = {
-			name: v.name,
-			value: '???',
-			type: typeof v.value,
-			variablesReference: 0,
-			evaluateName: '$' + v.name
-		};
-
-		if (v.name.indexOf('lazy') >= 0) {
-			// a "lazy" variable needs an additional click to retrieve its value
-
-			dapVariable.value = 'lazy var';		// placeholder value
-			v.reference ??= this._variableHandles.create(new RuntimeVariable('', [ new RuntimeVariable('', v.value) ]));
-			dapVariable.variablesReference = v.reference;
-			dapVariable.presentationHint = { lazy: true };
-		} else {
-
-			if (Array.isArray(v.value)) {
-				dapVariable.value = 'Object';
-				v.reference ??= this._variableHandles.create(v);
-				dapVariable.variablesReference = v.reference;
-			} else {
-
-				switch (typeof v.value) {
-					case 'number':
-						if (Math.round(v.value) === v.value) {
-							dapVariable.value = this.formatNumber(v.value);
-							(<any>dapVariable).__vscodeVariableMenuContext = 'simple';	// enable context menu contribution
-							dapVariable.type = 'integer';
-						} else {
-							dapVariable.value = v.value.toString();
-							dapVariable.type = 'float';
-						}
-						break;
-					case 'string':
-						dapVariable.value = `"${v.value}"`;
-						break;
-					case 'boolean':
-						dapVariable.value = v.value ? 'true' : 'false';
-						break;
-					default:
-						dapVariable.value = typeof v.value;
-						break;
-				}
-			}
-		}
-
-		if (v.memory) {
-			v.reference ??= this._variableHandles.create(v);
-			dapVariable.memoryReference = String(v.reference);
-		}
-
-		return dapVariable;
-	}
-
-	private formatAddress(x: number, pad = 8) {
-		return 'mem' + (this._addressesInHex ? '0x' + x.toString(16).padStart(8, '0') : x.toString(10));
-	}
-
-	private formatNumber(x: number) {
-		return this._valuesInHex ? '0x' + x.toString(16) : x.toString(10);
-	}
-
-	private createSource(filePath: string): Source {
-		return new Source(basename(filePath), this.convertDebuggerPathToClient(filePath), undefined, undefined, 'mock-adapter-data');
 	}
 }
 
