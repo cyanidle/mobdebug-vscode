@@ -2,7 +2,7 @@
 
 import * as vscode from 'vscode';
 import { WorkspaceFolder, DebugConfiguration, ProviderResult, CancellationToken } from 'vscode';
-import { MobDebugSession, IMobArguments } from './mobDebug';
+import { MobDebugSession, IMobArguments } from './mobDebugAdapter';
 
 export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(vscode.debug.registerDebugConfigurationProvider('mobdebug', {
